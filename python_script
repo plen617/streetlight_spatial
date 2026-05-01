@@ -1,0 +1,94 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import statsmodels.formula.api as smf
+from scipy.stats import kde
+
+# Define Lilac midpoint and distance band parameters
+LILAC_E = 673345.32
+LILAC_N = 4577481.20
+BAND_EDGES = [0, 300, 700, 1500] 
+BAND_LABELS = ['Near (0–300 m)', 'Mid (300–700 m)', 'Far (700–1500 m)']
+
+
+df = pd.read_csv('output_x_y.csv')
+
+# 2. Spatial Calculations
+# Calculate Euclidean distance to the streetlight midpoint
+df['distance'] = np.sqrt((df['X'] - LILAC_E)**2 + (df['Y'] - LILAC_N)**2)
+
+# Assign distance bands
+def assign_band(d):
+    if d <= 300: return 'Near'
+    if d <= 700: return 'Mid'
+    if d <= 1500: return 'Far'
+    return 'Outside'
+
+df['band'] = df['distance'].apply(assign_band)
+
+# 3. Aggregate Time Series
+# Count crimes per year and band
+ts_data = df.groupby(['YEAR', 'band']).size().reset_index(name='crime_count')
+
+# Pivot for easier plotting and analysis
+ts_pivot = ts_data.pivot(index='YEAR', columns='band', values='crime_count').fillna(0)
+
+# 4. Prepare for DiD Regression
+# We will compare 'Near' (Treated) vs 'Far' (Control)
+did_df = ts_data[ts_data['band'].isin(['Near', 'Far'])].copy()
+did_df['is_treated'] = (did_df['band'] == 'Near').astype(int)
+
+# IMPORTANT: Since we are post-2012, 'time' here represents the progression of years
+# or the citywide trend. 
+did_df['time_index'] = did_df['YEAR'] - did_df['YEAR'].min()
+
+# Regression Model: Count ~ Time + Treated + (Time * Treated)
+# This tests if the TREND in the 'Near' band differs from the 'Far' band.
+model = smf.ols(formula="crime_count ~ time_index * is_treated", data=did_df).fit()
+
+
+plt.figure(figsize=(16, 12))
+
+# Plot 1: Time Series of Crime Counts by Band
+plt.subplot(2, 2, 1)
+for band in ['Near', 'Mid', 'Far']:
+    if band in ts_pivot.columns:
+        plt.plot(ts_pivot.index, ts_pivot[band], marker='o', label=band)
+plt.title('Crime Counts by Distance Band (Since 2019)')
+plt.xlabel('Year')
+plt.ylabel('Number of Crimes')
+plt.legend()
+plt.grid(True, alpha=0.3)
+
+# Plot 2: Heatmap of Crime Locations
+plt.subplot(2, 2, 2)
+sns.kdeplot(data=df, x='X', y='Y', fill=True, cmap='rocket', thresh=0, levels=100)
+plt.scatter(LILAC_E, LILAC_N, color='cyan', marker='*', s=200, label='Streetlight (Lilac Midpoint)')
+plt.title('Spatial Density of Crimes (Heatmap)')
+plt.xlabel('UTM Easting (X)')
+plt.ylabel('UTM Northing (Y)')
+plt.legend()
+
+# Plot 3: Distance Decay Histogram
+plt.subplot(2, 2, 3)
+sns.histplot(df[df['distance'] <= 1500], x='distance', bins=30, kde=True, color='teal')
+plt.axvline(300, color='red', linestyle='--', label='Near Boundary')
+plt.axvline(700, color='orange', linestyle='--', label='Mid Boundary')
+plt.title('Distribution of Crimes by Distance to Light')
+plt.xlabel('Distance (meters)')
+plt.legend()
+
+# Regression Results Summary 
+plt.subplot(2, 2, 4)
+plt.text(0.05, 0.95, "Simple DiD Regression Results\n(Near vs Far Trends 2019-2026)", 
+         fontsize=12, weight='bold', va='top')
+plt.text(0.05, 0.85, str(model.summary().tables[1]), family='monospace', va='top')
+plt.axis('off')
+
+plt.tight_layout()
+plt.show()
+
+# Full regression summary
+print("\n--- DiD Regression Summary ---")
+print(model.summary())
